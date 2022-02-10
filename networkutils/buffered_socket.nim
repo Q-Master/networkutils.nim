@@ -4,11 +4,16 @@ import ptr_math
 const DEFAULT_BUFFER_SIZE = 4096
 
 type
-  BufferedSocketBaseObj = object of RootObj
-    buffer: seq[byte]
+  Buffer = ref BufferObj
+  BufferObj = object of RootObj
+    data: seq[byte]
     pos: ptr byte
     dataSize: int
     freeSpace: int
+
+  BufferedSocketBaseObj = object of RootObj
+    inBuffer: Buffer
+    outBuffer: Buffer
 
   AsyncBufferedSocket* = ref AsyncBufferedSocketObj
   AsyncBufferedSocketObj* = object of BufferedSocketBaseObj
@@ -18,20 +23,40 @@ type
   BufferedSocketObj* = object of BufferedSocketBaseObj
     sock: Socket
 
-proc resetPos(socket: AsyncBufferedSocket | BufferedSocket) =
-  socket.pos = cast[ptr byte](addr(socket.buffer[0]))
-  socket.dataSize = 0
-  socket.freeSpace = socket.buffer.len
 
-proc advancePos(socket: AsyncBufferedSocket | BufferedSocket, step: int) =
-  if socket.pos + step >= socket.pos + socket.buffer.len - 1:
-    socket.resetPos()
+proc resetPos(buf: Buffer) =
+  buf.pos = cast[ptr byte](addr(buf.data[0]))
+  buf.dataSize = 0
+  buf.freeSpace = buf.data.len
+
+proc advancePos(buf: Buffer, step: int) =
+  if buf.pos + step >= buf.pos + buf.data.len - 1:
+    buf.resetPos()
   else:
-    if socket.dataSize >= step:
-      socket.pos += step
-      socket.dataSize -= step
+    if buf.dataSize >= step:
+      buf.pos += step
+      buf.dataSize -= step
     else:
-      socket.resetPos()
+      buf.resetPos()
+
+proc fetchMaxAvailable(sock: AsyncBufferedSocket | BufferedSocket) {.multisync.} =
+  if sock.inBuffer.freeSpace == 0 and sock.inBuffer.dataSize == 0:
+    sock.inBuffer.resetPos()
+  if sock.inBuffer.freeSpace > 0:
+    when sock is AsyncBufferedSocket:
+        var dataSize = await sock.sock.recvInto(sock.inBuffer.pos+sock.inBuffer.dataSize, sock.inBuffer.freeSpace)
+    else:
+      var dataSize = sock.sock.recv(sock.inBuffer.pos+sock.inBuffer.dataSize, sock.inBuffer.freeSpace)
+    sock.inBuffer.dataSize += dataSize
+    sock.inBuffer.freeSpace -= dataSize
+
+proc newBuffer(size: Natural): Buffer =
+  if size > 0:
+    result.new
+    result.data.setLen(size)
+    result.resetPos()
+  else:
+    result = nil
 
 proc newBufferedSocket*(socket: Socket = nil, bufSize = DEFAULT_BUFFER_SIZE): BufferedSocket =
   result.new
@@ -39,8 +64,7 @@ proc newBufferedSocket*(socket: Socket = nil, bufSize = DEFAULT_BUFFER_SIZE): Bu
     result.sock = newSocket(buffered = false)
   else:
     result.sock = socket
-  result.buffer.setLen(bufSize)
-  result.resetPos()
+  result.inBuffer = newBuffer(bufSize)
 
 proc newAsyncBufferedSocket*(socket: AsyncSocket = nil, bufSize = DEFAULT_BUFFER_SIZE): AsyncBufferedSocket =
   result.new
@@ -48,8 +72,7 @@ proc newAsyncBufferedSocket*(socket: AsyncSocket = nil, bufSize = DEFAULT_BUFFER
     result.sock = newAsyncSocket(buffered = false)
   else:
     result.sock = socket
-  result.buffer.setLen(bufSize)
-  result.resetPos()
+  result.inBuffer = newBuffer(bufSize)
 
 proc connect*(sock: AsyncBufferedSocket | BufferedSocket, address: string, port: Port) {.multisync.} =
   await sock.sock.connect(address, port)
@@ -60,33 +83,22 @@ proc connect*(sock: AsyncBufferedSocket | BufferedSocket, address: string, port:
 proc close*(sock: AsyncBufferedSocket | BufferedSocket) =
   sock.sock.close()
 
-proc fetchMaxAvailable(sock: AsyncBufferedSocket | BufferedSocket) {.multisync.} =
-  if sock.freeSpace == 0 and sock.dataSize == 0:
-    sock.resetPos()
-  if sock.freeSpace > 0:
-    when sock is AsyncBufferedSocket:
-        var dataSize = await sock.sock.recvInto(sock.pos+sock.dataSize, sock.freeSpace)
-    else:
-      var dataSize = sock.sock.recv(sock.pos+sock.dataSize, sock.freeSpace)
-    sock.dataSize += dataSize
-    sock.freeSpace -= dataSize
-
 proc recvInto*(sock: AsyncBufferedSocket | BufferedSocket, dst: ptr byte, size: int): Future[int] {.multisync.} =
-  # if buffer has less than size dataSize we should copy all the dataSize, reset the pos
+  # if inBuffer has less than size dataSize we should copy all the dataSize, reset the pos
   # and dataSize and download more bufLen bytes
   var partSize = 0
   while partSize < size:
-    if sock.dataSize == 0:
+    if sock.inBuffer.dataSize == 0:
       await sock.fetchMaxAvailable()
     let diffSize = size - partSize
-    if sock.dataSize >= diffSize:
-      copyMem(dst+partSize, sock.pos, diffSize)
+    if sock.inBuffer.dataSize >= diffSize:
+      copyMem(dst+partSize, sock.inBuffer.pos, diffSize)
       partSize += diffSize
-      sock.advancePos(diffSize)
+      sock.inBuffer.advancePos(diffSize)
     else:
-      copyMem(dst+partSize, sock.pos, sock.dataSize)
-      partSize += sock.dataSize
-      sock.resetPos()
+      copyMem(dst+partSize, sock.inBuffer.pos, sock.inBuffer.dataSize)
+      partSize += sock.inBuffer.dataSize
+      sock.inBuffer.resetPos()
   result = size
 
 proc recvInto*(sock: AsyncBufferedSocket | BufferedSocket, dst: openArray[byte]): Future[int] {.multisync.} =
@@ -103,10 +115,10 @@ proc recvLine*(sock: AsyncBufferedSocket | BufferedSocket, maxLen = DEFAULT_BUFF
   var lastL: bool = false
   var len, fullLen: int = 0
   while fullLen < maxLen:
-    if sock.dataSize == 0:
+    if sock.inBuffer.dataSize == 0:
       await sock.fetchMaxAvailable()
-    for i in 0 .. sock.dataSize-1:
-      case (sock.pos+i)[]
+    for i in 0 .. sock.inBuffer.dataSize-1:
+      case (sock.inBuffer.pos+i)[]
       of '\r'.byte:
         lastR = true
       of '\L'.byte:
@@ -118,19 +130,19 @@ proc recvLine*(sock: AsyncBufferedSocket | BufferedSocket, maxLen = DEFAULT_BUFF
         len.inc()
     fullLen += len
     result.setLen(fullLen)
-    copyMem(cast[ptr byte](unsafeAddr(result[0+fullLen-len])), sock.pos, len)
-    sock.advancePos(len)
+    copyMem(cast[ptr byte](unsafeAddr(result[0+fullLen-len])), sock.inBuffer.pos, len)
+    sock.inBuffer.advancePos(len)
     len = 0
     if lastR:
-      sock.advancePos(1)
+      sock.inBuffer.advancePos(1)
     if lastL:
-      sock.advancePos(1)
+      sock.inBuffer.advancePos(1)
     if lastR:
       break
   if fullLen == 0:
     result = ""
 
-proc send(sock: AsyncBufferedSocket | BufferedSocket, source: ptr byte, size: int): Future[int] {.multisync.} =
+proc send*(sock: AsyncBufferedSocket | BufferedSocket, source: ptr byte, size: int): Future[int] {.multisync.} =
   when sock is AsyncBufferedSocket:
     await sock.sock.send(source, size)
   else:
@@ -161,8 +173,8 @@ proc listen*(sock: AsyncBufferedSocket | BufferedSocket, backlog = SOMAXCONN) {.
 
 proc accept*(sock: AsyncBufferedSocket, flags = {SocketFlag.SafeDisconn}, inheritable = defined(nimInheritHandles)): Future[AsyncBufferedSocket] {.async.} =
   let client = await accept(sock.sock, flags)
-  result = newAsyncBufferedSocket(client, sock.buffer.len)
+  result = newAsyncBufferedSocket(client, sock.inBuffer.data.len)
 
 proc accept*(sock: BufferedSocket, flags = {SocketFlag.SafeDisconn}, inheritable = defined(nimInheritHandles)): BufferedSocket =
-  result = newBufferedSocket(bufsize = sock.buffer.len)
+  result = newBufferedSocket(bufsize = sock.inBuffer.data.len)
   accept(sock.sock, result.sock, flags, inheritable)
