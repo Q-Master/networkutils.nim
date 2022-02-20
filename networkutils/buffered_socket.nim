@@ -1,4 +1,4 @@
-import std/[os, asyncdispatch, asyncnet, net, nativesockets]
+import std/[os, asyncdispatch, asyncnet, net, nativesockets, endians]
 import ptr_math
 
 const DEFAULT_BUFFER_SIZE = 4096
@@ -25,20 +25,26 @@ type
     sock: Socket
 
 
+
+proc len(s: Buffer): int {.inline.} = s.data.len()
+
 proc resetPos(buf: Buffer) =
   buf.pos = buf.zPtr
   buf.dataSize = 0
-  buf.freeSpace = buf.data.len
+  buf.freeSpace = buf.len()
 
-proc advancePos(buf: Buffer, step: int) =
-  if buf.pos + step >= buf.pos + buf.data.len - 1:
+proc advancePos(buf: Buffer, step: Natural) =
+  if buf.pos + step >= buf.pos + buf.len() - 1:
     buf.resetPos()
   else:
-    if buf.dataSize >= step:
-      buf.pos += step
-      buf.dataSize -= step
-    else:
-      buf.resetPos()
+    buf.pos += step
+
+proc showBuffer*(sock: AsyncBufferedSocket | BufferedSocket) =
+  echo "In:"
+  echo sock.inBuffer.data
+  if not sock.outBuffer.isNil:
+    echo "Out:"
+    echo sock.outBuffer.data
 
 proc fetchMaxAvailable(sock: AsyncBufferedSocket | BufferedSocket) {.multisync.} =
   if sock.inBuffer.freeSpace == 0 and sock.inBuffer.dataSize == 0:
@@ -51,7 +57,7 @@ proc fetchMaxAvailable(sock: AsyncBufferedSocket | BufferedSocket) {.multisync.}
     sock.inBuffer.dataSize += dataSize
     sock.inBuffer.freeSpace -= dataSize
 
-proc flush(sock: AsyncSocket | Socket, data: ptr byte, size: Natural) {.multisync.} =
+proc flush(sock: AsyncSocket | Socket, data: ptr byte, size: int) {.multisync.} =
   when sock is AsyncSocket:
     await sock.send(data, size)
   else:
@@ -76,7 +82,7 @@ proc newBuffer(size: Natural): Buffer =
   if size > 0:
     result.new
     result.data.setLen(size)
-    result.zPtr = cast[ptr byte](addr(result.data[0]))
+    result.zPtr = result.data[0].addr
     result.resetPos()
   else:
     result = nil
@@ -111,7 +117,7 @@ proc close*(sock: AsyncBufferedSocket | BufferedSocket) {.multisync.} =
     await sock.pushMaxAvailable()
   sock.sock.close()
 
-proc recvInto*(sock: AsyncBufferedSocket | BufferedSocket, dst: ptr byte, size: int): Future[int] {.multisync.} =
+proc recvInto*(sock: AsyncBufferedSocket | BufferedSocket, dst: ptr byte, size: int){.multisync.} =
   # if inBuffer has less than size dataSize we should copy all the dataSize, reset the pos
   # and dataSize and download more bufLen bytes
   var partSize = 0
@@ -123,21 +129,19 @@ proc recvInto*(sock: AsyncBufferedSocket | BufferedSocket, dst: ptr byte, size: 
       copyMem(dst+partSize, sock.inBuffer.pos, diffSize)
       partSize += diffSize
       sock.inBuffer.advancePos(diffSize)
+      sock.inBuffer.dataSize.dec(diffSize)
     else:
       copyMem(dst+partSize, sock.inBuffer.pos, sock.inBuffer.dataSize)
       partSize += sock.inBuffer.dataSize
       sock.inBuffer.resetPos()
-  result = size
 
-proc recvInto*(sock: AsyncBufferedSocket | BufferedSocket, dst: openArray[byte]): Future[int] {.multisync.} =
-  result = await sock.recvInto(cast[ptr byte](unsafeAddr(dst[0])), dst.len)
+proc recvInto*(sock: AsyncBufferedSocket | BufferedSocket, dst: openArray[byte]) {.multisync.} =
+  await sock.recvInto(cast[ptr byte](unsafeAddr(dst[0])), dst.len)
 
 proc recv*(sock: AsyncBufferedSocket | BufferedSocket, size: int): Future[string] {.multisync.} =
   result.setLen(size)
-  let newSize = await sock.recvInto(cast[ptr byte](result[0].addr), size)
-  if newSize != size:
-    raise newException(IOError, "Sizes don't match")
-
+  await sock.recvInto(cast[ptr byte](result[0].addr), size)
+  
 proc recvLine*(sock: AsyncBufferedSocket | BufferedSocket, maxLen = DEFAULT_BUFFER_SIZE): Future[string] {.multisync.} =
   var lastR: bool = false
   var lastL: bool = false
@@ -160,11 +164,14 @@ proc recvLine*(sock: AsyncBufferedSocket | BufferedSocket, maxLen = DEFAULT_BUFF
     result.setLen(fullLen)
     copyMem(cast[ptr byte](unsafeAddr(result[0+fullLen-len])), sock.inBuffer.pos, len)
     sock.inBuffer.advancePos(len)
+    #sock.inBuffer.dataSize.dec(len)
     len = 0
     if lastR:
       sock.inBuffer.advancePos(1)
+      #sock.inBuffer.dataSize.dec()
     if lastL:
       sock.inBuffer.advancePos(1)
+      #sock.inBuffer.dataSize.dec()
     if lastR:
       break
   if fullLen == 0:
@@ -174,8 +181,8 @@ proc send*(sock: AsyncBufferedSocket | BufferedSocket, source: ptr byte, size: i
   if not sock.outBuffer.isNil:
     var ending: int
     if size > sock.outBuffer.freeSpace:
-      if size > sock.outBuffer.data.len:
-        ending = size.mod(sock.outBuffer.data.len)
+      if size > sock.outBuffer.len:
+        ending = size.mod(sock.outBuffer.len)
         if ending > sock.outBuffer.freeSpace:
           ending.dec(sock.outBuffer.freeSpace)
       else:
@@ -218,8 +225,132 @@ proc listen*(sock: AsyncBufferedSocket | BufferedSocket, backlog = SOMAXCONN) {.
 
 proc accept*(sock: AsyncBufferedSocket, flags = {SocketFlag.SafeDisconn}, inheritable = defined(nimInheritHandles)): Future[AsyncBufferedSocket] {.async.} =
   let client = await accept(sock.sock, flags)
-  result = newAsyncBufferedSocket(client, sock.inBuffer.data.len)
+  result = newAsyncBufferedSocket(client, sock.inBuffer.len)
 
 proc accept*(sock: BufferedSocket, flags = {SocketFlag.SafeDisconn}, inheritable = defined(nimInheritHandles)): BufferedSocket =
-  result = newBufferedSocket(inBufSize = sock.inBuffer.data.len, outBufSize = sock.outBuffer.data.len)
+  result = newBufferedSocket(inBufSize = sock.inBuffer.len, outBufSize = sock.outBuffer.len)
   accept(sock.sock, result.sock, flags, inheritable)
+
+# ----------
+
+const sizeInt8Uint8* = sizeof(int8)
+const sizeInt16Uint16* = sizeof(int16)
+const sizeInt32Uint32* = sizeof(int32)
+const sizeInt64Uint64* = sizeof(int64)
+const sizeFloat32* = sizeof(float32)
+const sizeFloat64* = sizeof(float64)
+
+template getN(s: BufferedSocket | AsyncBufferedSocket, t: type) =
+  if s.inBuffer.dataSize < sizeof(t) and s.inBuffer.freeSpace == 0:
+    await s.recvInto(cast[ptr byte](result.addr), sizeof(t))
+  else:
+    if s.inBuffer.dataSize < sizeof(t):
+        await s.fetchMaxAvailable()
+    result = cast[ptr t](s.inBuffer.pos)[]
+    advancePos(s.inBuffer, sizeof(t))
+    s.inBuffer.dataSize.dec(sizeof(t))
+
+proc read8*(s: BufferedSocket | AsyncBufferedSocket): Future[int8] {.multisync.} =
+  s.getN(int8)
+
+proc readU8*(s: BufferedSocket | AsyncBufferedSocket): Future[uint8] {.multisync.} =
+  s.getN(uint8)
+
+proc read16*(s: BufferedSocket | AsyncBufferedSocket): Future[int16] {.multisync.} =
+  s.getN(int16)
+
+proc readBE16*(s: BufferedSocket | AsyncBufferedSocket): Future[int16] {.multisync.} =
+  s.getN(int16)
+  bigEndian16(addr result, addr result)
+
+proc readU16*(s: BufferedSocket | AsyncBufferedSocket): Future[uint16] {.multisync.} =
+  s.getN(uint16)
+
+proc readBEU16*(s: BufferedSocket | AsyncBufferedSocket): Future[uint16] {.multisync.} =
+  s.getN(uint16)
+  bigEndian16(addr result, addr result)
+
+proc read32*(s: BufferedSocket | AsyncBufferedSocket): Future[int32] {.multisync.} =
+  s.getN(int32)
+
+proc readBE32*(s: BufferedSocket | AsyncBufferedSocket): Future[int32] {.multisync.} =
+  s.getN(int32)
+  bigEndian32(addr result, addr result)
+
+proc readU32*(s: BufferedSocket | AsyncBufferedSocket): Future[uint32] {.multisync.} =
+  s.getN(uint32)
+
+proc readBEU32*(s: BufferedSocket | AsyncBufferedSocket): Future[uint32] {.multisync.} =
+  s.getN(uint32)
+  bigEndian32(addr result, addr result)
+
+proc read64*(s: BufferedSocket | AsyncBufferedSocket): Future[int64] {.multisync.} =
+  s.getN(int64)
+
+proc readBE64*(s: BufferedSocket | AsyncBufferedSocket): Future[int64] {.multisync.} =
+  s.getN(int64)
+  bigEndian64(addr result, addr result)
+
+proc readU64*(s: BufferedSocket | AsyncBufferedSocket): Future[uint64] {.multisync.} =
+  s.getN(uint64)
+
+proc readBEU64*(s: BufferedSocket | AsyncBufferedSocket): Future[uint64] {.multisync.} =
+  s.getN(uint64)
+  bigEndian64(addr result, addr result)
+
+proc readFloat32*(s: BufferedSocket | AsyncBufferedSocket): Future[float32] {.multisync.} =
+  s.getN(float32)
+
+proc readFloat64*(s: BufferedSocket | AsyncBufferedSocket): Future[float64] {.multisync.} =
+  s.getN(float64)
+
+proc readString*(s: BufferedSocket | AsyncBufferedSocket, size: int): Future[string] {.multisync.} =
+  result = await s.recv(size)
+
+# ----------
+
+template putN[T](s: BufferedSocket | AsyncBufferedSocket, some: T) =
+  if s.outBuffer.isNil:
+    let tmp = some
+    await s.sock.flush(cast[ptr byte](tmp.unsafeAddr), sizeof(T))
+  else:
+    if s.outBuffer.freeSpace < sizeof(T):
+      await s.pushMaxAvailable()
+    let tmpPtr = cast[ptr T](s.outBuffer.pos)
+    tmpPtr[] = some
+    advancePos(s.outBuffer, sizeof(T))
+    s.outBuffer.freeSpace.dec(sizeof(T))
+    s.outBuffer.dataSize.inc(sizeof(T))
+
+proc write*[T: int8 | uint8](s: BufferedSocket | AsyncBufferedSocket, x: T) {.multisync.} =
+  putN[T](s, x)
+
+proc write*[T: int16 | uint16](s: BufferedSocket | AsyncBufferedSocket, x: T) {.multisync.} =
+  putN[T](s, x)
+
+proc writeBE*[T: int16 | uint16](s: BufferedSocket | AsyncBufferedSocket, x: T) {.multisync.} =
+  var n = x
+  bigEndian16(addr n, addr n)
+  putN[T](s, n)
+
+proc write*[T: int32 | uint32](s: BufferedSocket | AsyncBufferedSocket, x: T) {.multisync.} =
+  putN[T](s, x)
+
+proc writeBE*[T: int32 | uint32](s: BufferedSocket | AsyncBufferedSocket, x: T) {.multisync.} =
+  var n = x
+  bigEndian32(addr n, addr n)
+  putN[T](s, n)
+
+proc write*[T: int64 | uint64](s: BufferedSocket | AsyncBufferedSocket, x: T) {.multisync.} =
+  putN[T](s, x)
+
+proc writeBE*[T: int64 | uint64](s: BufferedSocket | AsyncBufferedSocket, x: T) {.multisync.} =
+  var n = x
+  bigEndian64(addr n, addr n)
+  putN[T](s, n)
+
+proc write*[T: float32 | float64](s: BufferedSocket | AsyncBufferedSocket, x: T) {.multisync.} =
+  putN[T](s, x)
+
+proc writeString*(s: BufferedSocket | AsyncBufferedSocket, str: string) {.multisync.} =
+  let x {.used.} = await s.send(str)
