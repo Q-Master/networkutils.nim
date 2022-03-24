@@ -200,8 +200,11 @@ proc send*(sock: AsyncBufferedSocket | BufferedSocket, source: ptr byte, size: i
   else:
     await sock.sock.flush(source, size)
 
-proc send*(sock: AsyncBufferedSocket | BufferedSocket, data: openArray[byte]): Future[int] {.multisync.} =
-  result = await sock.send(cast[ptr byte](unsafeAddr(data[0])), data.len)
+proc send*(sock: AsyncBufferedSocket, data: openArray[byte]): Future[int] =
+  result = sock.send(cast[ptr byte](unsafeAddr(data[0])), data.len)
+
+proc send*(sock: BufferedSocket, data: openArray[byte]): int =
+  result = sock.send(cast[ptr byte](unsafeAddr(data[0])), data.len)
 
 proc send*(sock: AsyncBufferedSocket | BufferedSocket, data: string): Future[int] {.multisync.} =
   result = await sock.send(cast[ptr byte](unsafeAddr(data[0])), data.len)
