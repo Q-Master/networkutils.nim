@@ -24,6 +24,7 @@ type
   BufferedSocketObj* = object of BufferedSocketBaseObj
     sock: Socket
 
+  BufferIsTooSmallException* = object of CatchableError
 
 
 proc len(s: Buffer): int {.inline.} = s.data.len()
@@ -87,7 +88,6 @@ proc newBuffer(size: Natural): Buffer =
   else:
     result = nil
 
-
 proc newBufferedSocket*(socket: Socket = nil, inBufSize = DEFAULT_BUFFER_SIZE, outBufSize = 0): BufferedSocket =
   result.new
   if socket.isNil:
@@ -105,6 +105,23 @@ proc newAsyncBufferedSocket*(socket: AsyncSocket = nil, inBufSize = DEFAULT_BUFF
     result.sock = socket
   result.inBuffer = newBuffer(inBufSize)
   result.outBuffer = newBuffer(outBufSize)
+
+proc resizeInBuffer*(sock: AsyncBufferedSocket | BufferedSocket, newSize: Natural) =
+  #TODO Add syncronization to block using the buffer while updating
+  if newSize < sock.inBuffer.dataSize:
+    raise newException(BufferIsTooSmallException, "New buffer size is too small to copy all existing data")
+  let newBuf = newBuffer(newSize)
+  copyMem(newBuf.zPtr, sock.inBuffer.pos, sock.inBuffer.dataSize)
+  newBuf.dataSize = sock.inBuffer.dataSize
+  newBuf.freeSpace = newSize - sock.inBuffer.dataSize
+  sock.inBuffer = newBuffer
+
+proc resizeOutBuffer*(sock: AsyncBufferedSocket | BufferedSocket, newSize: Natural) {.multisync.} =
+  #TODO Add syncronization to block using the buffer while updating
+  if not sock.outBuffer.isNil and sock.outBuffer.dataSize > 0:
+    await sock.pushMaxAvailable()
+  let newBuf = newBuffer(newSize)
+  sock.outBuffer = newBuf
 
 proc connect*(sock: AsyncBufferedSocket | BufferedSocket, address: string, port: Port) {.multisync.} =
   await sock.sock.connect(address, port)
