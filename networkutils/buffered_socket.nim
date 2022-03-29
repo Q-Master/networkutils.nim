@@ -374,3 +374,15 @@ proc write*[T: float32 | float64](s: BufferedSocket | AsyncBufferedSocket, x: T)
 
 proc writeString*(s: BufferedSocket | AsyncBufferedSocket, str: string) {.multisync.} =
   let x {.used.} = await s.send(str)
+
+
+#-- some debug code
+
+proc setInBuffer*(s: BufferedSocket | AsyncBufferedSocket, data: sink string | seq[byte]) =
+  var size = data.len
+  if size > s.inBuffer.data.len:
+    size = s.inBuffer.data.len
+  copyMem(s.inBuffer.data[0].addr, data[0].unsafeAddr, size)
+  s.inBuffer.dataSize = size
+  s.inBuffer.freeSpace = s.inBuffer.data.len - size
+  s.inBuffer.pos = s.inBuffer.zPtr
