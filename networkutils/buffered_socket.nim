@@ -15,10 +15,12 @@ type
   BufferedSocketBaseObj = object of RootObj
     inBuffer: Buffer
     outBuffer: Buffer
+    timeout: int
 
   AsyncBufferedSocket* = ref AsyncBufferedSocketObj
   AsyncBufferedSocketObj* = object of BufferedSocketBaseObj
     sock: AsyncSocket
+    fut: Future[int]
   
   BufferedSocket* = ref BufferedSocketObj
   BufferedSocketObj* = object of BufferedSocketBaseObj
@@ -51,10 +53,11 @@ proc fetchMaxAvailable(sock: AsyncBufferedSocket | BufferedSocket) {.multisync.}
   if sock.inBuffer.freeSpace == 0 and sock.inBuffer.dataSize == 0:
     sock.inBuffer.resetPos()
   if sock.inBuffer.freeSpace > 0:
+    var dataSize: int = 0
     when sock is AsyncBufferedSocket:
-      var dataSize = await sock.sock.recvInto(sock.inBuffer.pos+sock.inBuffer.dataSize, sock.inBuffer.freeSpace)
+      dataSize = await sock.sock.recvInto(sock.inBuffer.pos+sock.inBuffer.dataSize, sock.inBuffer.freeSpace)
     else:
-      var dataSize = sock.sock.recv(sock.inBuffer.pos+sock.inBuffer.dataSize, sock.inBuffer.freeSpace)
+      dataSize = sock.sock.recv(sock.inBuffer.pos+sock.inBuffer.dataSize, sock.inBuffer.freeSpace)
     if dataSize == 0:
       raise newException(ConnectionClosedError, "Connection is closed")
     sock.inBuffer.dataSize += dataSize
@@ -90,23 +93,27 @@ proc newBuffer(size: Natural): Buffer =
   else:
     result = nil
 
-proc newBufferedSocket*(socket: Socket = nil, inBufSize = DEFAULT_BUFFER_SIZE, outBufSize = 0): BufferedSocket =
+proc initSocket(sock: AsyncBufferedSocket | BufferedSocket, inBufSize: Natural, outBufSize: Natural, timeout: int) =
+  sock.timeout = timeout
+  sock.inBuffer = newBuffer(inBufSize)
+  sock.outBuffer = newBuffer(outBufSize)
+
+proc newBufferedSocket*(socket: Socket = nil, inBufSize = DEFAULT_BUFFER_SIZE, outBufSize = 0, timeout = -1): BufferedSocket =
   result.new
   if socket.isNil:
     result.sock = newSocket(buffered = false)
   else:
     result.sock = socket
-  result.inBuffer = newBuffer(inBufSize)
-  result.outBuffer = newBuffer(outBufSize)
+  result.initSocket(inBufSize, outBufSize, timeout)
 
-proc newAsyncBufferedSocket*(socket: AsyncSocket = nil, inBufSize = DEFAULT_BUFFER_SIZE, outBufSize = 0): AsyncBufferedSocket =
+proc newAsyncBufferedSocket*(socket: AsyncSocket = nil, inBufSize = DEFAULT_BUFFER_SIZE, outBufSize = 0, timeout = -1): AsyncBufferedSocket =
   result.new
   if socket.isNil:
     result.sock = newAsyncSocket(buffered = false)
   else:
     result.sock = socket
-  result.inBuffer = newBuffer(inBufSize)
-  result.outBuffer = newBuffer(outBufSize)
+  result.fut = nil
+  result.initSocket(inBufSize, outBufSize, timeout)
 
 proc resizeInBuffer*(sock: AsyncBufferedSocket | BufferedSocket, newSize: Natural) =
   #TODO Add syncronization to block using the buffer while updating
@@ -125,11 +132,25 @@ proc resizeOutBuffer*(sock: AsyncBufferedSocket | BufferedSocket, newSize: Natur
   let newBuf = newBuffer(newSize)
   sock.outBuffer = newBuf
 
-proc connect*(sock: AsyncBufferedSocket | BufferedSocket, address: string, port: Port) {.multisync.} =
-  await sock.sock.connect(address, port)
+proc connect*(sock: BufferedSocket, address: string, port: Port) =
+  sock.sock.connect(address, port, sock.timeout)
 
-proc connect*(sock: AsyncBufferedSocket | BufferedSocket, address: string, port: SomeInteger | SomeUnsignedInt) {.multisync.} =
-  await sock.sock.connect(address, Port(port))
+proc connect*(sock: BufferedSocket, address: string, port: SomeInteger | SomeUnsignedInt) =
+  sock.connect(address, Port(port))
+
+proc connect*(sock: AsyncBufferedSocket, address: string, port: Port) {.async.} =
+  let connFut = sock.sock.connect(address, port)
+  var success = false
+  if sock.timeout > 0:
+    success = await connFut.withTimeout(sock.timeout)
+  else:
+    await connFut
+    success = true
+  if not success:
+    raise newException(TimeoutError, "Call to 'connect' timed out.")
+
+proc connect*(sock: AsyncBufferedSocket, address: string, port: SomeInteger | SomeUnsignedInt): Future[void] =
+  sock.connect(address, Port(port))
 
 proc close*(sock: AsyncBufferedSocket | BufferedSocket) {.multisync.} =
   if not sock.outBuffer.isNil:
