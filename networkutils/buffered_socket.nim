@@ -25,7 +25,7 @@ type
     sock: Socket
 
   BufferIsTooSmallException* = object of CatchableError
-
+  ConnectionClosedError* = object of CatchableError
 
 proc len(s: Buffer): int {.inline.} = s.data.len()
 
@@ -52,9 +52,11 @@ proc fetchMaxAvailable(sock: AsyncBufferedSocket | BufferedSocket) {.multisync.}
     sock.inBuffer.resetPos()
   if sock.inBuffer.freeSpace > 0:
     when sock is AsyncBufferedSocket:
-        var dataSize = await sock.sock.recvInto(sock.inBuffer.pos+sock.inBuffer.dataSize, sock.inBuffer.freeSpace)
+      var dataSize = await sock.sock.recvInto(sock.inBuffer.pos+sock.inBuffer.dataSize, sock.inBuffer.freeSpace)
     else:
       var dataSize = sock.sock.recv(sock.inBuffer.pos+sock.inBuffer.dataSize, sock.inBuffer.freeSpace)
+    if dataSize == 0:
+      raise newException(ConnectionClosedError, "Connection is closed")
     sock.inBuffer.dataSize += dataSize
     sock.inBuffer.freeSpace -= dataSize
 
