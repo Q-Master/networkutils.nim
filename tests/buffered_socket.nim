@@ -5,7 +5,7 @@ import networkutils/buffered_socket
 const BUF_SIZE = 10
 const BIG_BUF_SIZE = 128
 
-suite "Socket connection":
+suite "Buffered socket operations":
   setup:
     discard
 

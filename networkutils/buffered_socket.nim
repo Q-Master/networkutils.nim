@@ -1,5 +1,6 @@
 import std/[os, asyncdispatch, asyncnet, net, nativesockets, endians]
 import ptr_math
+import ./asyncnetwork 
 
 const DEFAULT_BUFFER_SIZE = 4096
 
@@ -55,9 +56,9 @@ proc fetchMaxAvailable(sock: AsyncBufferedSocket | BufferedSocket) {.multisync.}
   if sock.inBuffer.freeSpace > 0:
     var dataSize: int = 0
     when sock is AsyncBufferedSocket:
-      dataSize = await sock.sock.recvInto(sock.inBuffer.pos+sock.inBuffer.dataSize, sock.inBuffer.freeSpace)
+      dataSize = await sock.sock.recvInto(sock.inBuffer.pos+sock.inBuffer.dataSize, sock.inBuffer.freeSpace, sock.timeout)
     else:
-      dataSize = sock.sock.recv(sock.inBuffer.pos+sock.inBuffer.dataSize, sock.inBuffer.freeSpace)
+      dataSize = sock.sock.recv(sock.inBuffer.pos+sock.inBuffer.dataSize, sock.inBuffer.freeSpace, sock.timeout)
     if dataSize == 0:
       raise newException(ConnectionClosedError, "Connection is closed")
     sock.inBuffer.dataSize += dataSize
