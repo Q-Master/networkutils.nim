@@ -133,6 +133,9 @@ proc resizeOutBuffer*(sock: AsyncBufferedSocket | BufferedSocket, newSize: Natur
   let newBuf = newBuffer(newSize)
   sock.outBuffer = newBuf
 
+proc setTimeout*(sock: AsyncBufferedSocket | BufferedSocket, timeout: int) =
+  sock.timeout = timeout
+
 proc connect*(sock: BufferedSocket, address: string, port: Port) =
   sock.sock.connect(address, port, sock.timeout)
 
