@@ -356,7 +356,7 @@ proc readString*(s: BufferedSocket | AsyncBufferedSocket, size: int): Future[str
 
 # ----------
 
-template putN[T](s: BufferedSocket | AsyncBufferedSocket, some: T) =
+proc putN[T](s: BufferedSocket | AsyncBufferedSocket, some: T) {.multisync.}=
   if s.outBuffer.isNil:
     let tmp = some
     await s.sock.flush(cast[ptr byte](tmp.unsafeAddr), sizeof(T))
@@ -370,38 +370,37 @@ template putN[T](s: BufferedSocket | AsyncBufferedSocket, some: T) =
     s.outBuffer.dataSize.inc(sizeof(T))
 
 proc write*[T: int8 | uint8](s: BufferedSocket | AsyncBufferedSocket, x: T) {.multisync.} =
-  putN[T](s, x)
+  await putN[T](s, x)
 
 proc write*[T: int16 | uint16](s: BufferedSocket | AsyncBufferedSocket, x: T) {.multisync.} =
-  putN[T](s, x)
+  await putN[T](s, x)
 
 proc writeBE*[T: int16 | uint16](s: BufferedSocket | AsyncBufferedSocket, x: T) {.multisync.} =
   var n = x
   bigEndian16(addr n, addr n)
-  putN[T](s, n)
+  await putN[T](s, n)
 
 proc write*[T: int32 | uint32](s: BufferedSocket | AsyncBufferedSocket, x: T) {.multisync.} =
-  putN[T](s, x)
+  await putN[T](s, x)
 
 proc writeBE*[T: int32 | uint32](s: BufferedSocket | AsyncBufferedSocket, x: T) {.multisync.} =
   var n = x
   bigEndian32(addr n, addr n)
-  putN[T](s, n)
+  await putN[T](s, n)
 
 proc write*[T: int64 | uint64](s: BufferedSocket | AsyncBufferedSocket, x: T) {.multisync.} =
-  putN[T](s, x)
+  await putN[T](s, x)
 
 proc writeBE*[T: int64 | uint64](s: BufferedSocket | AsyncBufferedSocket, x: T) {.multisync.} =
   var n = x
   bigEndian64(addr n, addr n)
-  putN[T](s, n)
+  await putN[T](s, n)
 
 proc write*[T: float32 | float64](s: BufferedSocket | AsyncBufferedSocket, x: T) {.multisync.} =
-  putN[T](s, x)
+  await putN[T](s, x)
 
 proc writeString*(s: BufferedSocket | AsyncBufferedSocket, str: string) {.multisync.} =
   let x {.used.} = await s.send(str)
-
 
 #-- some debug code
 
