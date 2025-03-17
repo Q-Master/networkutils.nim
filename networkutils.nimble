@@ -1,6 +1,6 @@
 # Package
 description = "Various networking utils"
-version     = "0.6.2"
+version     = "0.7.0"
 license     = "MIT"
 author      = "Vladimir Berezenko <qmaster2000@gmail.com>"
 
