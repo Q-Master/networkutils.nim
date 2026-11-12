@@ -1,11 +1,11 @@
 # Package
 description = "Various networking utils"
-version     = "0.7.0"
+version     = "0.7.1"
 license     = "MIT"
 author      = "Vladimir Berezenko <qmaster2000@gmail.com>"
 
 # Dependencies
-requires "nim >= 1.4.00", "ptr_math"
+requires "nim >= 2.0"
 
 task test, "tests":
   let tests = @["asyncnetwork", "buffered_socket"]

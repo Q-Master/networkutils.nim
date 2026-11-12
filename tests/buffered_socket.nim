@@ -59,6 +59,40 @@ suite "Buffered socket operations":
       await f
     waitFor(testConnection())
 
+  test "Simple async socket double buffered test recvLine check":
+    proc server() {.async.} =
+      var sock = newAsyncBufferedSocket(inBufSize = BUF_SIZE, outBufSize = BUF_SIZE)
+      sock.setSockOpt(OptReuseAddr, true)
+      sock.bindAddr(Port(16161))
+      sock.listen()
+      let client = await sock.accept()
+      var str = await client.recvLine()
+      check(str == "CHECK the Socket")
+      await client.sendLine("CHECK complete even if the string is larger than the buffer")
+      await sock.flush()
+      str = await client.recvLine()
+      check(str == "CHECK the Socket")
+      await client.sendLine("CHECK complete even if the string is larger than the buffer")
+      await sock.flush()
+      await client.close()
+      await sock.close()
+
+    proc testConnection() {.async.} =
+      let f = server()
+      var sock = newAsyncBufferedSocket(inBufSize = BUF_SIZE, outBufSize = BUF_SIZE)
+      await sock.connect("localhost", Port(16161))
+      await sock.sendLine("CHECK the Socket")
+      await sock.flush()
+      var replStr = await sock.recvLine()
+      check(replStr == "CHECK complete even if the string is larger than the buffer")
+      await sock.sendLine("CHECK the Socket")
+      await sock.flush()
+      replStr = await sock.recvLine()
+      check(replStr == "CHECK complete even if the string is larger than the buffer")
+      await sock.close()
+      await f
+    waitFor(testConnection())
+
   test "Async socket double buffered reads/writes test":
     const B8_CHECK = 127'u8
     const L16_CHECK = 0xAA77'u16

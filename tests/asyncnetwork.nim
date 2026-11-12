@@ -62,3 +62,28 @@ suite "Async networking operations":
       sock.close()
       await f
     waitFor(testConnection())
+
+  test "Simple async socket recvLine check":
+    proc server() {.async.} =
+      var sock = newAsyncSocket(buffered = false)
+      sock.setSockOpt(OptReuseAddr, true)
+      sock.bindAddr(Port(16161))
+      sock.listen()
+      let client = await sock.accept()
+      await client.send("+PONG\r")
+      await sleepAsync(1000)
+      await client.send("\n+OK\r\n")
+      client.close()
+      sock.close()
+
+    proc testConnection() {.async.} =
+      let f = server()
+      var sock = newAsyncSocket(buffered = false)
+      await sock.connect("localhost", Port(16161))
+      var str = await sock.recvLine()
+      check(str == "+PONG")
+      str = await sock.recvLine()
+      check(str == "+OK")
+      sock.close()
+      await f
+    waitFor(testConnection())
