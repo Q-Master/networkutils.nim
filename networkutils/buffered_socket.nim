@@ -43,13 +43,6 @@ proc resetPos(buf: Buffer) =
   buf.freeSpace = buf.len()
 
 
-proc advancePos(buf: Buffer, step: Natural) =
-  if cast[uint](buf.pos + step).uint >= cast[uint](buf.pos + buf.len() - 1).uint:
-    buf.resetPos()
-  else:
-    buf.pos += step
-
-
 proc consume(buf: Buffer, n: int) {.inline.} =
   assert n <= buf.dataSize
   buf.pos += n
@@ -165,28 +158,28 @@ proc newAsyncBufferedSocket*(socket: AsyncSocket = nil, inBufSize = DEFAULT_BUFF
 
 
 proc resizeInBuffer*(sock: AsyncBufferedSocket | BufferedSocket, newSize: Natural) =
-  ## Resize incoming buffer for socket
-  ## Not stable yet
-  ## 
-  ## `newSize` - the new size for buffer in bytes
-  
-  #TODO Add syncronization to block using the buffer while updating
-  if newSize < sock.inBuffer.dataSize:
+  ## Resize incoming buffer, preserving unread data.
+  ## WARNING: call only when no read is in flight — a pending recv holds a raw
+  ## pointer into the old buffer.
+  let old = sock.inBuffer
+  let dataSize = if old.isNil: 0 else: old.dataSize
+  if newSize < dataSize:
     raise newException(BufferIsTooSmallException, "New buffer size is too small to copy all existing data")
-  let newBuf = newBuffer(newSize)
-  copyMem(newBuf.zPtr, sock.inBuffer.pos, sock.inBuffer.dataSize)
-  newBuf.dataSize = sock.inBuffer.dataSize
-  newBuf.freeSpace = newSize - sock.inBuffer.dataSize
-  sock.inBuffer = newBuffer
+  if newSize == 0:
+    #disable buffer
+    sock.inBuffer = nil
+  else:
+    let newBuf = newBuffer(newSize)
+    if dataSize > 0:
+      copyMem(newBuf.zPtr, old.pos, dataSize)
+    newBuf.dataSize = dataSize
+    newBuf.freeSpace = newSize - dataSize
+    sock.inBuffer = newBuf
 
 
 proc resizeOutBuffer*(sock: AsyncBufferedSocket | BufferedSocket, newSize: Natural) {.multisync.} =
-  ## Resize outgoing buffer for socket
-  ## Not stable yet
-  ## 
-  ## `newSize` - the new size for buffer in bytes
-  
-  #TODO Add syncronization to block using the buffer while updating
+  ## Resize outgoing buffer, preserving unread data.
+  ## WARNING: call only when no write is in flight
   if not sock.outBuffer.isNil and sock.outBuffer.dataSize > 0:
     await sock.pushMaxAvailable()
   let newBuf = newBuffer(newSize)
@@ -374,8 +367,7 @@ proc readInto*(inBuffer: Buffer, dst: ptr byte, size: int) =
   if inBuffer.dataSize < size:
     raise newException(BufferIsTooSmallException, "Not enough data for " & $size)
   copyMem(dst, inBuffer.pos, size)
-  inBuffer.advancePos(size.Natural)
-  inBuffer.dataSize.dec(size) 
+  inBuffer.consume(size)
 
 
 proc read*(inBuffer: Buffer, size: int): string =
@@ -512,22 +504,18 @@ const sizeFloat64* = sizeof(float64)
 
 
 template getN(s: BufferedSocket | AsyncBufferedSocket, t: type) =
-  if s.inBuffer.dataSize < sizeof(t) and s.inBuffer.freeSpace == 0:
+  if s.inBuffer.dataSize < sizeof(t):
     await s.recvInto(cast[ptr byte](result.addr), sizeof(t))
   else:
-    if s.inBuffer.dataSize < sizeof(t):
-        await s.fetchMaxAvailable()
-    result = cast[ptr t](s.inBuffer.pos)[]
-    advancePos(s.inBuffer, sizeof(t))
-    s.inBuffer.dataSize.dec(sizeof(t))
+    copyMem(result.addr, s.inBuffer.pos, sizeof(t))
+    s.inBuffer.consume(sizeof(t))
 
 
 template getN(inBuffer: Buffer, t: type) =
   if inBuffer.dataSize < sizeof(t):
     raise newException(BufferIsTooSmallException, "Not enough data for " & $sizeof(t))
-  result = cast[ptr t](inBuffer.pos)[]
-  advancePos(inBuffer, sizeof(t))
-  inBuffer.dataSize.dec(sizeof(t))
+  copyMem(result.addr, inBuffer.pos, sizeof(t))
+  inBuffer.consume(sizeof(t))
 
 
 proc read8*(s: BufferedSocket | AsyncBufferedSocket): Future[int8] {.multisync.} =
@@ -679,27 +667,26 @@ proc readString*(inBuffer: Buffer, size: int): string =
 
 # ----------
 
-
-proc putN[T](s: BufferedSocket | AsyncBufferedSocket, some: T) {.multisync.}=
+proc putN[T](s: BufferedSocket | AsyncBufferedSocket, some: T) {.multisync.} =
   if s.outBuffer.isNil:
     let tmp = some
     await s.sock.flush(cast[ptr byte](tmp.unsafeAddr), sizeof(T))
   else:
     if s.outBuffer.freeSpace < sizeof(T):
       await s.pushMaxAvailable()
-    let tmpPtr = cast[ptr T](s.outBuffer.pos)
-    tmpPtr[] = some
-    advancePos(s.outBuffer, sizeof(T))
+    let tmp = some
+    copyMem(s.outBuffer.pos, tmp.unsafeAddr, sizeof(T))
+    s.outBuffer.pos += sizeof(T)
     s.outBuffer.freeSpace.dec(sizeof(T))
     s.outBuffer.dataSize.inc(sizeof(T))
 
 
 template putN[T](outBuffer: Buffer, some: T) =
   if outBuffer.freeSpace < sizeof(T):
-    raise newException(BufferIsTooSmallException, "Not enough data for " & $sizeof(t))
-  let tmpPtr = cast[ptr T](outBuffer.pos)
-  tmpPtr[] = some
-  advancePos(outBuffer, sizeof(T))
+    raise newException(BufferIsTooSmallException, "Not enough data for " & $sizeof(T))
+  let tmp = some
+  copyMem(outBuffer.pos, tmp.unsafeAddr, sizeof(T))
+  outBuffer.pos += sizeof(T)
   outBuffer.freeSpace.dec(sizeof(T))
   outBuffer.dataSize.inc(sizeof(T))
 
