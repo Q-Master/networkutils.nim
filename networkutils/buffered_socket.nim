@@ -269,11 +269,20 @@ proc recvInto*(sock: AsyncBufferedSocket | BufferedSocket, dst: ptr byte, size: 
       sock.inBuffer.resetPos()
 
 
-proc recvInto*(sock: AsyncBufferedSocket | BufferedSocket, dst: openArray[byte]) {.multisync.} =
+proc recvInto*(sock: BufferedSocket, dst: openArray[byte]) =
   ## Recv data to `openArray[byte]`.
   ## If incoming buffer has less than `size` bytes of data it will try to read missing bytes from socket.
-  ## 
+  ##
   ## `dst` - the openArray to read data to
+
+  sock.recvInto(cast[ptr byte](unsafeAddr(dst[0])), dst.len)
+
+
+proc recvInto*(sock: AsyncBufferedSocket, dst: seq[byte]) {.async.} =
+  ## Recv data to `seq[byte]`.
+  ## If incoming buffer has less than `size` bytes of data it will try to read missing bytes from socket.
+  ## 
+  ## `dst` - the seq[byte] to read data to
   
   await sock.recvInto(cast[ptr byte](unsafeAddr(dst[0])), dst.len)
 
@@ -410,13 +419,23 @@ proc send*(sock: AsyncBufferedSocket | BufferedSocket, source: ptr byte, size: i
     await sock.sock.flush(source, size)
 
 
-proc send*(sock: BufferedSocket | AsyncBufferedSocket, data: openArray[byte]): Future[int] {.multisync.} =
-  ## Send bytes from openArray
+proc send*(sock: BufferedSocket, data: openArray[byte]): int =
+  ## Send bytes from openArray[byte]
   ## Everything that doesn't fit in socket buffer will be immediately sent
   ## the least will be placed to socket buffer.
   ## 
-  ## `data` - source openArray to send
+  ## `data` - source openArray[byte] to send
   
+  result = sock.send(cast[ptr byte](unsafeAddr(data[0])), data.len)
+
+
+proc send*(sock: AsyncBufferedSocket, data: seq[byte]): Future[int] {.async.} =
+  ## Send bytes from seq[byte]
+  ## Everything that doesn't fit in socket buffer will be immediately sent
+  ## the least will be placed to socket buffer.
+  ##
+  ## `data` - source seq[byte] to send
+
   result = await sock.send(cast[ptr byte](unsafeAddr(data[0])), data.len)
 
 
